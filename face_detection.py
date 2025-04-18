@@ -128,11 +128,13 @@ if __name__ == "__main__":
         conf_thresh=0.6,
         nms_thresh=0.4
     )
-    cap = cv2.VideoCapture(0)
+    # cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture("/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi")
     while True:
         ret, frame = cap.read()
         if not ret:
             break
+        frame = cv2.resize(frame, (640, 360), interpolation=cv2.INTER_AREA)
         detections = detector.detect(frame)
         for x1, y1, x2, y2, score in detections:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
