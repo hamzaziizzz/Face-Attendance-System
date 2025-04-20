@@ -27,7 +27,7 @@ rec_session = ort.InferenceSession(
 rec_input_name = rec_session.get_inputs()[0].name
 
 # 3) Milvus connection & collection
-connections.connect(alias="default", host="192.168.12.1", port="19530")
+connections.connect(alias="default", host="localhost", port="19530")
 collection = Collection("ABESIT_FACE_DATA_COLLECTION_FOR_COSINE")
 collection.load()
 
