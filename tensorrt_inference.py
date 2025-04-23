@@ -155,7 +155,6 @@ class FaceRecognizerTRT:
         return h_out.reshape(1,-1)
 
 # ─── RECOGNITION PREPROCESS ────────────────────────────────────────────────────
-
 def preprocess_recognition(face_img: np.ndarray) -> np.ndarray:
     face_rgb = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
     face_resized = cv2.resize(face_rgb, (112, 112), interpolation=cv2.INTER_AREA)
@@ -183,6 +182,7 @@ def worker(rtsp_url, out_queue, det_engine, rec_engine, collection, params):
             outs = detector.infer(blob)
             dets = detector.postprocess(outs, orig, info)
 
+            if dets: print(dets)
             for x1,y1,x2,y2,score in dets:
                 sx,sy = w/640, h/360
                 ox1,oy1 = int(x1*sx), int(y1*sy)
@@ -191,7 +191,9 @@ def worker(rtsp_url, out_queue, det_engine, rec_engine, collection, params):
                 if crop.size==0: continue
                 # pass preprocessed blob, not raw crop
                 emb = recognizer.infer(preprocess_recognition(crop))[0].tolist()
+                # print(emb)
                 res = collection.search([emb], anns_field="embeddings", param=params, limit=1, output_fields=["name_id"])
+                # print(res)
                 color, label = (0,0,255), ""
                 if res and len(res[0]) > 0:
                     hit = res[0][0]
@@ -199,6 +201,7 @@ def worker(rtsp_url, out_queue, det_engine, rec_engine, collection, params):
                     name_id = hit.entity.get("name_id")
                     color = (0, 255, 0) if match_score >= 0.4 else (0, 0, 255)
                     label = f"{name_id}: {match_score:.2f}"
+                    # print(label)
 
                 cv2.rectangle(frame,(ox1,oy1),(ox2,oy2),color,2)
                 if label:
@@ -209,7 +212,7 @@ def worker(rtsp_url, out_queue, det_engine, rec_engine, collection, params):
             if now - out_t0 >= 1.0:
                 out_fps = out_count/(now-out_t0)
                 out_count, out_t0 = 0, now
-            cv2.putText(frame, f"FPS: {out_fps:.2f}",(10,h-10),cv2.FONT_HERSHEY_SIMPLEX,3,(255,0,255),2)
+            cv2.putText(frame, f"FPS: {out_fps:.2f}",(10,h-10),cv2.FONT_HERSHEY_SIMPLEX,3,(255,0,255),8)
 
             if out_queue.full():
                 try: out_queue.get_nowait()
@@ -227,15 +230,19 @@ def main():
     params = {"metric_type":"COSINE","params":{"nprobe":16}}
 
     streams = [
+        # "rtsp://grilsquad:grilsquad@192.168.12.18:554/stream1",
+        # "rtsp://grilsquad:grilsquad@192.168.12.17:554/stream1",
+        # "rtsp://grilsquad:grilsquad@192.168.12.19:554/stream1",
+        # "rtsp://admin:admin@123@192.168.7.61:554/cam/realmonitor?channel=1&subtype=0",
+        # "rtsp://admin:admin@123@192.168.7.60:554/cam/realmonitor?channel=1&subtype=0",
         "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
-        "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
+        # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
         # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
         # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
         # "/home/hamza/OfficeProjects/CCTV-Face-Recognition-Attendance-System/TEST-VIDEOS/ABESIT/ABESIT-Main-Gate-Test-Video.avi",
@@ -259,7 +266,7 @@ def main():
         t.start()
         queues[url] = q
 
-    TH, TW = 360, 640
+    TH, TW = 720, 1280
     n = len(streams)
     cols = math.ceil(math.sqrt(n))
     rows = math.ceil(n/cols)

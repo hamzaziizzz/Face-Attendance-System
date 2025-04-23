@@ -1,29 +1,72 @@
-# reshape_scrfd.py
-import onnx, argparse
+# reshape_scrfd.py  ▸  make batch static OR dynamic
+import onnx
+import argparse
 
-def reshape(model, n: int, h: int, w: int):
-    inp = model.graph.input[0].type.tensor_type.shape.dim
-    inp[0].dim_value = n      # batch size
-    inp[2].dim_value = h
-    inp[3].dim_value = w
+def reshape(model, batch, h, w, dynamic=False):
+    """
+    If dynamic is True **or** batch < 0 → batch dim becomes symbolic.
+    Otherwise the batch dimension is set to the positive integer `batch`.
+    """
+    def _set_dim(dim, value, symbolic=False):
+        dim.ClearField("dim_value")
+        dim.ClearField("dim_param")
+        if symbolic:
+            dim.dim_param = "batch_size"      # any name is fine
+        else:
+            dim.dim_value = value
+
+    # ── INPUT ───────────────────────────────────────────────
+    inp_dims = model.graph.input[0].type.tensor_type.shape.dim
+    if dynamic or batch < 0:
+        _set_dim(inp_dims[0], None, symbolic=True)
+    else:
+        _set_dim(inp_dims[0], batch)
+
+    inp_dims[2].dim_value = h
+    inp_dims[3].dim_value = w
+
+    # ── OUTPUTS (make first dim match input) ───────────────
+    for out in model.graph.output:
+        out_dim = out.type.tensor_type.shape.dim[0]
+        if dynamic or batch < 0:
+            _set_dim(out_dim, None, symbolic=True)
+        else:
+            _set_dim(out_dim, batch)
+
     return model
 
+
+def parse_args():
+    p = argparse.ArgumentParser(
+        description="Reshape SCRFD ONNX, optionally making batch dimension dynamic")
+    p.add_argument("--onnx", required=True, help="Input ONNX path")
+    p.add_argument("--out",  required=True, help="Output ONNX path")
+    p.add_argument("--batch",  type=int, default=-1,
+                   help="Batch size. Use -1 for dynamic (default: -1)")
+    p.add_argument("--height", type=int, default=640)
+    p.add_argument("--width",  type=int, default=640)
+    p.add_argument("--dynamic-batch", action="store_true",
+                   help="Force dynamic batch even if --batch is positive")
+    return p.parse_args()
+
+
 def main():
-    p = argparse.ArgumentParser()
-    p.add_argument('--onnx',   required=True)
-    p.add_argument('--out',    required=True)
-    p.add_argument('--batch',  type=int, default=1)
-    p.add_argument('--height', type=int, default=640)
-    p.add_argument('--width',  type=int, default=640)
-    args = p.parse_args()
+    args = parse_args()
 
     model = onnx.load(args.onnx)
-    reshaped = reshape(model,
-                       n=args.batch,
-                       h=args.height,
-                       w=args.width)
+    reshaped = reshape(
+        model,
+        batch=args.batch,
+        h=args.height,
+        w=args.width,
+        dynamic=args.dynamic_batch or args.batch < 0
+    )
     onnx.save(reshaped, args.out)
-    print(f"Saved static ONNX with batch={args.batch}, size={args.width}×{args.height}")
 
-if __name__ == '__main__':
+    mode = "dynamic" if (args.dynamic_batch or args.batch < 0) else "static"
+    bsz  = "symbolic" if mode == "dynamic" else str(args.batch)
+    print(f"[SUCCESS] Saved {mode} ONNX → {args.out}  (batch={bsz}, size={args.width}×{args.height})")
+
+
+if __name__ == "__main__":
     main()
