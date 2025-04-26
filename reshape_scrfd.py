@@ -25,13 +25,13 @@ def reshape(model, batch, h, w, dynamic=False):
     inp_dims[2].dim_value = h
     inp_dims[3].dim_value = w
 
-    # ── OUTPUTS (make first dim match input) ───────────────
-    for out in model.graph.output:
-        out_dim = out.type.tensor_type.shape.dim[0]
-        if dynamic or batch < 0:
-            _set_dim(out_dim, None, symbolic=True)
-        else:
-            _set_dim(out_dim, batch)
+    # # ── OUTPUTS (make first dim match input) ───────────────
+    # for out in model.graph.output:
+    #     out_dim = out.type.tensor_type.shape.dim[0]
+    #     if dynamic or batch < 0:
+    #         _set_dim(out_dim, None, symbolic=True)
+    #     else:
+    #         _set_dim(out_dim, batch)
 
     return model
 

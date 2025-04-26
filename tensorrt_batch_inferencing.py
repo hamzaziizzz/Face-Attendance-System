@@ -29,11 +29,11 @@ NMS_TH             = 0.4
 # replace with your actual video sources or RTSP URLs
 STREAMS     = [
     0,
-    "rtsp://grilsquad:grilsquad@192.168.12.18:554/stream1",
-    "rtsp://grilsquad:grilsquad@192.168.12.17:554/stream1",
-    "rtsp://grilsquad:grilsquad@192.168.12.19:554/stream1",
-    "rtsp://admin:admin@123@192.168.7.61:554/cam/realmonitor?channel=1&subtype=0",
-    "rtsp://admin:admin@123@192.168.7.60:554/cam/realmonitor?channel=1&subtype=0",
+    # "rtsp://grilsquad:grilsquad@192.168.12.18:554/stream1",
+    # "rtsp://grilsquad:grilsquad@192.168.12.17:554/stream1",
+    # "rtsp://grilsquad:grilsquad@192.168.12.19:554/stream1",
+    # "rtsp://admin:admin@123@192.168.7.61:554/cam/realmonitor?channel=1&subtype=0",
+    # "rtsp://admin:admin@123@192.168.7.60:554/cam/realmonitor?channel=1&subtype=0",
 ]
 
 MOSAIC_CELL = (360, 640)  # H, W of each thumbnail
@@ -360,7 +360,6 @@ def main():
     out_fps = 25  # Set to actual frame rate if known
     out_size = (Wc * cols, Hc * rows)
     video_writer = cv2.VideoWriter(out_path, fourcc, out_fps, out_size)
-    ...
 
     while True:
         thumbs = []
