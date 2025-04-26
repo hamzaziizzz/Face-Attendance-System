@@ -21,6 +21,7 @@ import pycuda.driver as cuda
 import pycuda.autoinit  # noqa: F401 initializes CUDA driver
 import tensorrt as trt
 from typing import List, Tuple, Dict
+from pymilvus import connections, Collection
 import gc
 
 # Thresholds for detection confidence and NMS IoU
@@ -380,49 +381,71 @@ class FaceRecognizer:
         if batch.size == 0:
             return np.zeros((0, self.model.buffer_shapes[self.model.primary_input][1] // (112*112*3)), dtype=np.float32)
         outputs = self.model.infer(
-            {self.model.primary_input: batch}, batch.shape[0])
+            {self.model.primary_input: batch}, batch.shape[0]
+        )
         # assume first output is embedding
         return list(outputs.values())[0]
 
 
+class FaceSearch:
+    """Milvus Face Search Client."""
+
+    def __init__(self, host="127.0.0.1", port=19530, collection_name="ABESIT_FACE_DATA_COLLECTION_FOR_COSINE"):
+        connections.connect(host=host, port=port)
+        self.collection = Collection(collection_name)
+        self.collection.load()
+        self.search_params = {"metric_type": "COSINE", "params": {"nprobe": 16}}
+
+    def search(self, vectors: List[List[float]], limit=1):
+        """Search face embeddings in Milvus and return name_id only if score > 0.48."""
+        try:
+            results = self.collection.search(
+                vectors,
+                anns_field="embeddings",
+                param=self.search_params,
+                limit=limit,
+                output_fields=["name_id"]
+            )
+            search_outputs = []
+            for result in results:
+                if result and result[0].distance > 0.48:  # Distance is 1 - score
+                    name_id = result[0].entity.get("name_id")
+                    search_outputs.append(name_id)
+                else:
+                    search_outputs.append(None)
+            return search_outputs
+        except Exception as e:
+            print(f"[ERROR] Milvus search failed: {e}")
+            return [None for _ in vectors]
+
+
 class FacePipeline:
-    """
-    High-level pipeline: detect faces in images, draw boxes, save crops,
-    extract embeddings, and report timings.
-    """
+    """High-level face detection → recognition → Milvus search → annotate images (batch-safe)."""
 
     def __init__(self, detector_path: str, recognizer_path: str):
-        """
-        Initialize detector and recognizer.
-        """
+        """Initialize FaceDetector, FaceRecognizer and FaceSearch."""
         self.detector = FaceDetector(detector_path)
         self.recognizer = FaceRecognizer(recognizer_path)
+        self.search = FaceSearch(host="127.0.0.1", port=19530)
 
-    def run(
-            self,
-            image_paths: List[str],
-            max_batch_size: int = 32,
-            output_dir: str = "output"
-    ) -> None:
-        """
-        Execute full pipeline on a list of image paths.
-        Saves annotated images and prints timing info.
-        Args:
-            image_paths: list of filesystem paths to images
-            max_batch_size: number of images/faces per inference batch
-            output_dir: directory to save annotated results
-        """
+    def run(self, image_paths: List[str], max_batch_size: int = 32, output_dir: str = "output") -> None:
+        """Run the full pipeline batch-safely and save annotated output images."""
         os.makedirs(output_dir, exist_ok=True)
-        # load images with error checking
+
+        # Step 1: Load all images
         images = []
-        for p in image_paths:
-            img = cv2.imread(p)
+        for path in image_paths:
+            img = cv2.imread(path)
             if img is None:
-                print(f"[WARN] Failed to read image: {p}")
+                print(f"[WARN] Failed to read image: {path}")
                 continue
             images.append(img)
 
-        # detection loop
+        if not images:
+            print("[ERROR] No valid images to process.")
+            return
+
+        # Step 2: Face Detection
         all_boxes = []
         for i in range(0, len(images), max_batch_size):
             batch = images[i:i+max_batch_size]
@@ -430,67 +453,99 @@ class FacePipeline:
             try:
                 boxes = self.detector.detect_faces(batch)
             except Exception as e:
-                print(
-                    f"[ERROR] Detection failed on batch {i//max_batch_size}: {e}")
+                print(f"[ERROR] Detection failed on batch {i//max_batch_size}: {e}")
                 boxes = [[] for _ in batch]
             t1 = time.time()
-            print(
-                f"[INFO] Detection batch {i//max_batch_size+1} of size {len(batch)} took {t1-t0:.3f}s")
+            print(f"[INFO] Detection batch {i//max_batch_size+1} of size {len(batch)} took {t1-t0:.3f}s")
             all_boxes.extend(boxes)
-            del boxes
             gc.collect()
 
-        # drawing & cropping
+        print(f"[INFO] Total images processed for detection: {len(images)}")
+
+        # Step 3: Prepare crops + mappings
         crops = []
-        for idx, (img, boxes) in enumerate(zip(images, all_boxes)):
+        mappings = []  # {image_idx, bbox}
+
+        for img_idx, (img, boxes) in enumerate(zip(images, all_boxes)):
             for (x1, y1, x2, y2, conf) in boxes:
-                # draw bounding box and label
-                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(img, f"{conf:.2f}", (x1, max(y1-10, 0)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
-                # crop face region
                 face = img[y1:y2, x1:x2]
                 if face.size:
                     crops.append(face)
-            # save annotated image
-            out_path = os.path.join(output_dir, f"boxed_{idx+1}.jpg")
-            cv2.imwrite(out_path, img)
+                    mappings.append({
+                        "image_idx": img_idx,
+                        "bbox": (x1, y1, x2, y2)
+                    })
+
+        if not crops:
+            print("[ERROR] No faces found for recognition.")
+            return
 
         print(f"[INFO] Total faces detected: {len(crops)}")
 
-        # recognition loop
-        embeddings = []
+        # Step 4-6: Batchwise Recognition → Search → Annotation
+        face_counter = 0  # To track current face index across batches
+
         for i in range(0, len(crops), max_batch_size):
-            batch = crops[i:i+max_batch_size]
+            batch_crops = crops[i:i+max_batch_size]
+            batch_mappings = mappings[i:i+max_batch_size]
+
+            # Recognition
             t0 = time.time()
             try:
-                embs = self.recognizer.recognize(batch)
+                embs = self.recognizer.recognize(batch_crops)
             except Exception as e:
-                print(
-                    f"[ERROR] Recognition failed on batch {i//max_batch_size}: {e}")
-                embs = np.zeros((len(batch), 192), dtype=np.float32)
+                print(f"[ERROR] Recognition failed on batch {i//max_batch_size}: {e}")
+                embs = np.zeros((len(batch_crops), 192), dtype=np.float32)
             t1 = time.time()
-            print(
-                f"[INFO] Recognition batch {i//max_batch_size+1} of size {len(batch)} took {t1-t0:.3f}s")
-            embeddings.extend(embs)
-            del embs, batch
+            print(f"[INFO] Recognition batch {i//max_batch_size+1} of size {len(batch_crops)} took {t1-t0:.3f}s")
             gc.collect()
 
-        print(f"[INFO] Extracted {len(embeddings)} embeddings")
+            # Search
+            t0 = time.time()
+            try:
+                search_results = self.search.search(embs.tolist())
+            except Exception as e:
+                print(f"[ERROR] Milvus search failed on batch {i//max_batch_size}: {e}")
+                search_results = [None for _ in batch_crops]
+            t1 = time.time()
+            print(f"[INFO] Milvus search batch {i//max_batch_size+1} of size {len(batch_crops)} took {t1-t0:.3f}s")
+
+            # Annotate batch
+            for mapping, name_id in zip(batch_mappings, search_results):
+                img_idx = mapping["image_idx"]
+                x1, y1, x2, y2 = mapping["bbox"]
+                img = images[img_idx]
+
+                label = name_id if name_id is not None else "Unknown"
+
+                cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                cv2.putText(img, label, (x1, max(0, y1-10)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 2)
+
+            face_counter += len(batch_crops)
+
+        # Step 7: Save final output images
+        for idx, img in enumerate(images):
+            save_path = os.path.join(output_dir, f"boxed_{idx+1}.jpg")
+            cv2.imwrite(save_path, img)
+
+        print(f"[INFO] Annotated images saved to {output_dir}")
 
 
 if __name__ == "__main__":
-    # configure your engine paths and test images
+    # Paths to your TensorRT engines
     detector_path = "models/detection/trt-engine/scrfd_10g_gnkps_dynamic.engine"
     recognizer_path = "models/recognition/trt-engine/w600k_r50_dynamic.engine"
-    # example list of images
-    image_paths = [
-        "test-images/image-1.jpg",
-        "test-images/image-2.jpg",
-        # add more...
-    ] * 64
+
+    # Example test images
+    image_paths = list()
+
+    for file in os.listdir("test-images"):
+        if file.endswith(".jpg"):
+            image_paths.append(os.path.join("test-images", file))
 
     pipeline = FacePipeline(detector_path, recognizer_path)
     start = time.time()
     pipeline.run(image_paths, max_batch_size=64, output_dir="output")
-    print(f"[INFO] Total pipeline time: {time.time() - start:.3f}s")
+    end = time.time()
+    print(f"[INFO] Total pipeline time: {end - start:.6f} seconds")
