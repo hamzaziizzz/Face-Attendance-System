@@ -1,127 +1,156 @@
-#!/usr/bin/env python3
-"""
-DeepStream Python App Skeleton
-- Source → Streammux → nvosd → Sink
-"""
-
 import sys
 import gi
 gi.require_version('Gst', '1.0')
-from gi.repository import Gst, GObject
-import pyds
+from gi.repository import Gst, GLib
+
+import pyds  # DeepStream Python bindings
 
 # Initialize GStreamer
 Gst.init(None)
 
-def bus_call(bus, message, loop):
-    """Callback for GStreamer bus messages"""
-    msg_type = message.type
-    if msg_type == Gst.MessageType.EOS:
-        print("[INFO] End of stream")
-        loop.quit()
-    elif msg_type == Gst.MessageType.ERROR:
-        err, debug = message.parse_error()
-        print(f"[ERROR] {err}: {debug}")
-        loop.quit()
-    return True
+def osd_sink_pad_buffer_probe(pad, info, u_data):
+    frame_number = 0
+    gst_buffer = info.get_buffer()
+    if not gst_buffer:
+        return Gst.PadProbeReturn.OK
 
-def main(args):
-    # Create GStreamer pipeline
+    batch_meta = pyds.gst_buffer_get_nvds_batch_meta(hash(gst_buffer))
+    l_frame = batch_meta.frame_meta_list
+
+    while l_frame is not None:
+        try:
+            frame_meta = pyds.NvDsFrameMeta.cast(l_frame.data)
+        except StopIteration:
+            break
+
+        print(f"Processing frame {frame_meta.frame_num}")
+        print(f"Source Frame resolution: {frame_meta.source_frame_width}x{frame_meta.source_frame_height}")
+        l_obj = frame_meta.obj_meta_list
+        obj_count = 0
+
+        while l_obj is not None:
+            try:
+                obj_meta = pyds.NvDsObjectMeta.cast(l_obj.data)
+                obj_count += 1
+
+                # Verify detection matches parser output
+                print(f"  Object {obj_count}:")
+                print(f"    Class: {obj_meta.class_id}")
+                print(f"    Confidence: {obj_meta.confidence}")
+                print(f"    BBox: ({obj_meta.rect_params.left}, {obj_meta.rect_params.top}, "
+                      f"{obj_meta.rect_params.width}, {obj_meta.rect_params.height})")
+
+                obj_meta.rect_params.border_color.set(0.0, 1.0, 0.0, 1.0)  # Green
+                obj_meta.text_params.display_text = f"Face {obj_meta.confidence:.2f}"
+
+            except StopIteration:
+                break
+
+            try:
+                l_obj = l_obj.next
+            except StopIteration:
+                break
+
+        print(f"Frame {frame_meta.frame_num} had {obj_count} faces")
+        try:
+            l_frame = l_frame.next
+        except StopIteration:
+            break
+
+    return Gst.PadProbeReturn.OK
+
+
+def main(source_uri):
     pipeline = Gst.Pipeline()
 
     if not pipeline:
-        sys.stderr.write("[ERROR] Unable to create Pipeline\n")
+        sys.stderr.write(" Unable to create Pipeline \n")
 
-    # --- Source: Filesrc / RTSP ---
     source = Gst.ElementFactory.make("uridecodebin", "source")
-    if not source:
-        sys.stderr.write("[ERROR] Unable to create Source\n")
-    # Pass the video file or RTSP URL here
-    uri = args[1]
-    source.set_property('uri', uri)
+    source.set_property("uri", source_uri)
 
-    # --- Stream Muxer ---
-    streammux = Gst.ElementFactory.make("nvstreammux", "Stream-muxer")
-    if not streammux:
-        sys.stderr.write("[ERROR] Unable to create NvStreamMux\n")
-    streammux.set_property('width', 1920)
-    streammux.set_property('height', 1080)
-    streammux.set_property('batch-size', 1)
-    streammux.set_property('batched-push-timeout', 40000)
+    streammux = Gst.ElementFactory.make("nvstreammux", "stream-muxer")
+    streammux.set_property("batch-size", 1)
+    streammux.set_property("width", 2560)
+    streammux.set_property("height", 1440)
+    # streammux.set_property("enable-padding", 1)
+    streammux.set_property("batched-push-timeout", 40000)
 
-    # --- NVVideoConverter ---
-    nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "nvvid-converter")
-    if not nvvidconv:
-        sys.stderr.write("[ERROR] Unable to create nvvideoconvert\n")
+    pgie = Gst.ElementFactory.make("nvinfer", "primary-inference")
+    pgie.set_property("config-file-path", "config_infer_primary_scrfd.txt")
 
-    # --- NVOSD (Drawing Overlay) ---
-    nvosd = Gst.ElementFactory.make("nvdsosd", "nv-onscreendisplay")
-    if not nvosd:
-        sys.stderr.write("[ERROR] Unable to create nvdsosd\n")
+    nvvidconv = Gst.ElementFactory.make("nvvideoconvert", "convertor")
+    nvosd = Gst.ElementFactory.make("nvdsosd", "onscreendisplay")
 
-    # --- Sink: Video Renderer ---
     sink = Gst.ElementFactory.make("nveglglessink", "nvvideo-renderer")
-    if not sink:
-        sys.stderr.write("[ERROR] Unable to create Sink\n")
-    sink.set_property('sync', False)
 
-    # Add all elements into the pipeline
+    if not all([source, streammux, pgie, nvvidconv, nvosd, sink]):
+        sys.stderr.write(" Unable to create elements \n")
+        return
+
+    pipeline.add(source)
     pipeline.add(streammux)
+    pipeline.add(pgie)
     pipeline.add(nvvidconv)
     pipeline.add(nvosd)
     pipeline.add(sink)
 
-    # Link static elements
-    streammux.link(nvvidconv)
+    source.connect("pad-added", cb_newpad, streammux)
+
+    streammux.link(pgie)
+    pgie.link(nvvidconv)
     nvvidconv.link(nvosd)
     nvosd.link(sink)
 
-    # Dynamic pad linking (source pad of decodebin to sink pad of streammux)
-    def decodebin_child_added(child_proxy, Object, name, user_data):
-        print(f"[INFO] Decodebin child added: {name}")
-        if name.find("decodebin") != -1:
-            Object.connect("child-added", decodebin_child_added, user_data)
+    osdsinkpad = nvosd.get_static_pad("sink")
+    if osdsinkpad:
+        osdsinkpad.add_probe(Gst.PadProbeType.BUFFER, osd_sink_pad_buffer_probe, 0)
 
-    def cb_newpad(decodebin, decoder_src_pad, data):
-        print("[INFO] In cb_newpad")
-        caps = decoder_src_pad.query_caps(None)
-        gstname = caps.to_string()
-        print(f"[INFO] gstname = {gstname}")
+    print("[INFO] Starting pipeline")
+    pipeline.set_state(Gst.State.PLAYING)
 
-        if gstname.find("video") != -1:
-            sinkpad = streammux.get_request_pad("sink_0")
-            if not sinkpad:
-                sys.stderr.write("[ERROR] Unable to get the sink pad of streammux\n")
-            decoder_src_pad.link(sinkpad)
-        else:
-            print("[INFO] It has type: ", gstname)
+    loop = GLib.MainLoop()
 
-    source.connect("pad-added", cb_newpad, streammux)
-    source.connect("child-added", decodebin_child_added, streammux)
+    def bus_call(bus, message, user_data):
+        t = message.type
+        if t == Gst.MessageType.EOS:
+            print("[INFO] End-of-stream reached")
+            user_data.quit()
+        elif t == Gst.MessageType.ERROR:
+            err, dbg = message.parse_error()
+            sys.stderr.write(f"[ERROR] {err.message}\n{dbg or ''}\n")
+            user_data.quit()
+        return True
 
-    pipeline.add(source)
-
-    # Create event loop and feed GStreamer bus messages
-    loop = GObject.MainLoop()
     bus = pipeline.get_bus()
     bus.add_signal_watch()
     bus.connect("message", bus_call, loop)
 
-    # Start playing
-    print("[INFO] Starting pipeline")
-    pipeline.set_state(Gst.State.PLAYING)
     try:
         loop.run()
-    except Exception:
+    except:
         pass
 
-    # Cleanup
     print("[INFO] Exiting app")
     pipeline.set_state(Gst.State.NULL)
 
-if __name__ == '__main__':
+def cb_newpad(decodebin, pad, data):
+    print("[INFO] In cb_newpad")
+
+    caps = pad.get_current_caps()
+    gstname = caps.to_string()
+    print("[INFO] gstname =", gstname)
+
+    if "video" in gstname:
+        sinkpad = data.get_request_pad("sink_0")
+        if sinkpad:
+            pad.link(sinkpad)
+        else:
+            sys.stderr.write(" Unable to get sink pad of streammux \n")
+
+if __name__ == "__main__":
     if len(sys.argv) != 2:
-        sys.stderr.write(f"Usage: {sys.argv[0]} <URI or filepath>\n")
+        sys.stderr.write("Usage: %s <URI>\n" % sys.argv[0])
         sys.exit(1)
 
-    sys.exit(main(sys.argv))
+    main(sys.argv[1])
